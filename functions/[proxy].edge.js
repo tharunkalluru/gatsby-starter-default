@@ -1,103 +1,120 @@
 export default async function handler(request, context) {
   const response = await fetch(request);
+  let modifiedResponse = response.clone();
   const contentType = response.headers.get('content-type');
+
   if (contentType && contentType.includes('text/html')) {
-    const lyticsKey = context.env.LYTICS_KEY;
     let html = await response.text();
 
+    const lyticsKey = context.env.LYTICS_KEY;
+
     const lyticsScript = `
-      <script>
+      <script type="text/javascript">
         (function(){
-          // Setup Lytics API queue
-          window.jstag = window.jstag || {};
-          window._lyticsQueue = [];
-          ["send","mock","identify","pageView","unblock","getid","setid","loadEntity","getEntity","on","once","call"]
-            .forEach(fn => {
-              window.jstag[fn] = (...args) => {
-                window._lyticsQueue.push([fn, args]);
-              };
+          // Inject Lytics loader only when browser is idle (or fallback to load)
+          const initLytics = () => {
+            // Lytics bootstrap
+            !function(){
+              "use strict";
+              var o=window.jstag||(window.jstag={}),r=[];
+              function n(e){
+                o[e]=function(){
+                  for(var n=arguments.length,t=new Array(n),i=0;i<n;i++)t[i]=arguments[i];
+                  r.push([e,t])
+                }
+              }
+              n("send"),n("mock"),n("identify"),n("pageView"),n("unblock"),n("getid"),
+              n("setid"),n("loadEntity"),n("getEntity"),n("on"),n("once"),n("call"),
+              o.loadScript=function(n,t,i){
+                var e=document.createElement("script");
+                e.async=!0,e.src=n,e.onload=t,e.onerror=i;
+                var o=document.getElementsByTagName("script")[0],r=o&&o.parentNode||document.head||document.body,
+                    c=o||r.lastChild;
+                return null!=c?r.insertBefore(e,c):r.appendChild(e),this
+              },
+              o.init=function n(t){
+                return this.config=t,this.loadScript(t.src,function(){
+                  if(o.init===n)throw new Error("Load error!");
+                  o.init(o.config),function(){
+                    for(var n=0;n<r.length;n++){
+                      var t=r[n][0],i=r[n][1];
+                      o[t].apply(o,i)
+                    }
+                    r=void 0
+                  }()
+                }),this
+              }
+            }();
+
+            // Init Lytics
+            jstag.init({
+              src: 'https://c.lytics.io/api/tag/${lyticsKey}/latest.min.js',
+              pageAnalysis: { dataLayerPull: { disabled: true } }
             });
 
-          const loadLytics = () => {
-            const script = document.createElement("script");
-            script.src = "https://c.lytics.io/api/tag/${lyticsKey}/latest.min.js";
-            script.async = true;
-            script.onload = () => {
-              // Replay queued calls
-              window._lyticsQueue.forEach(([fn, args]) => {
-                try { window.jstag[fn](...args); } catch (e) { console.warn("[Lytics] Failed:", fn); }
-              });
-              window._lyticsQueue = [];
+            // Initial pageView
+            jstag.pageView();
+            console.log("[Lytics] Initial pageView sent:", location.pathname);
+
+            // Debounce repeated route changes
+            let lastPath = location.pathname;
+
+            const triggerLytics = () => {
+              if (location.pathname === lastPath) return;
+              lastPath = location.pathname;
+              console.log("[Lytics] Route changed:", lastPath);
 
               jstag.pageView();
-              console.log("[Lytics] pageView sent:", location.pathname);
 
-              const trigger = () => {
-                jstag.pageView();
-                if (jstag.loadEntity) {
-                  jstag.config.pathfora = jstag.config.pathfora || {};
-                  jstag.config.pathfora.publish = {
-                    candidates: { experiences: [], variations: [], legacyABTests: [] }
-                  };
-                  window._pfacfg = {};
-                  if (window.pathfora?.clearAll) window.pathfora.clearAll();
-                  jstag.loadEntity(p => console.log("[Lytics] Profile refreshed", p?.data || {}));
-                }
-              };
-
-              const patchRouter = () => {
-                const wrap = (fn) => function() {
-                  const r = fn.apply(this, arguments);
-                  window.dispatchEvent(new Event("lytics:navigation"));
-                  return r;
+              if (jstag.loadEntity) {
+                jstag.config.pathfora = jstag.config.pathfora || {};
+                jstag.config.pathfora.publish = {
+                  candidates: { experiences: [], variations: [], legacyABTests: [] }
                 };
-                history.pushState = wrap(history.pushState);
-                history.replaceState = wrap(history.replaceState);
-              };
-
-              const observeDOM = () => {
-                let lastPath = location.pathname;
-                setInterval(() => {
-                  if (location.pathname !== lastPath) {
-                    lastPath = location.pathname;
-                    window.dispatchEvent(new Event("lytics:navigation"));
-                  }
-                }, 500);
-
-                const mo = new MutationObserver(() => {
-                  const path = location.pathname;
-                  if (path !== lastPath) {
-                    lastPath = path;
-                    window.dispatchEvent(new Event("lytics:navigation"));
-                  }
+                window._pfacfg = {};
+                if (window.pathfora && window.pathfora.clearAll) {
+                  window.pathfora.clearAll();
+                }
+                jstag.loadEntity(function(profile) {
+                  console.log("[Lytics] Profile refreshed", profile?.data || {});
                 });
-                mo.observe(document.body, { childList: true, subtree: true });
-              };
-
-              window.addEventListener("lytics:navigation", trigger);
-              patchRouter();
-              observeDOM();
-              console.log("[Lytics] SPA route tracking ready.");
+              }
             };
-            document.head.appendChild(script);
+
+            // SPA routing hooks
+            const wrapHistory = (fn) => function(){
+              const result = fn.apply(this, arguments);
+              window.dispatchEvent(new Event('lytics:navigation'));
+              return result;
+            };
+            history.pushState = wrapHistory(history.pushState);
+            history.replaceState = wrapHistory(history.replaceState);
+            window.addEventListener("popstate", () => {
+              window.dispatchEvent(new Event('lytics:navigation'));
+            });
+
+            // Bind trigger to navigation event
+            window.addEventListener("lytics:navigation", triggerLytics);
           };
 
           if ('requestIdleCallback' in window) {
-            requestIdleCallback(loadLytics);
+            requestIdleCallback(initLytics);
           } else {
-            window.addEventListener("load", loadLytics);
+            window.addEventListener("load", initLytics);
           }
         })();
       </script>
     `;
 
-    // Inject before </head>
+    // Inject script before </head>
     html = html.replace('</head>', `${lyticsScript}</head>`);
-    return new Response(html, {
+
+    modifiedResponse = new Response(html, {
       headers: response.headers,
       status: response.status,
       statusText: response.statusText,
     });
   }
-  return response;
+
+  return modifiedResponse;
 }
