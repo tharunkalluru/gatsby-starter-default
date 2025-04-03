@@ -6,14 +6,14 @@ export default async function handler(request, context) {
   if (contentType && contentType.includes('text/html')) {
     let html = await response.text();
 
-    // Retrieve Lytics key from environment variable
+    // Access Lytics key from environment
     const lyticsKey = context.env.LYTICS_KEY;
 
-    // Lytics script with SPA handling
+    // Full Lytics script with framework-agnostic SPA support
     const lyticsScript = `
       <script type="text/javascript">
         (function(){
-          // Lytics JS Tag init
+          // Lytics init
           !function(){"use strict";var o=window.jstag||(window.jstag={}),r=[];
           function n(e){o[e]=function(){for(var n=arguments.length,t=new Array(n),i=0;i<n;i++)t[i]=arguments[i];
           r.push([e,t])}}n("send"),n("mock"),n("identify"),n("pageView"),n("unblock"),n("getid"),n("setid"),
@@ -36,56 +36,68 @@ export default async function handler(request, context) {
 
           jstag.init({
             src: 'https://c.lytics.io/api/tag/${lyticsKey}/latest.min.js',
-            pageAnalysis: {
-              dataLayerPull: { disabled: true }
-            }
+            pageAnalysis: { dataLayerPull: { disabled: true } }
           });
 
           // Initial pageview
           jstag.pageView();
 
-          // Hook route changes in SPA
-          const hookLyticsForSPA = () => {
-            const triggerLytics = () => {
-              jstag.pageView();
-              if (jstag.loadEntity) {
-                jstag.config.pathfora = jstag.config.pathfora || {};
-                jstag.config.pathfora.publish = {
-                  candidates: { experiences: [], variations: [], legacyABTests: [] }
-                };
-                window._pfacfg = {};
-                if (window.pathfora && window.pathfora.clearAll) {
-                  window.pathfora.clearAll();
-                }
-                jstag.loadEntity(function(profile) {
-                  console.log("Refreshed Lytics profile", profile.data);
-                });
+          // Lytics SPA Tracker
+          const triggerLytics = () => {
+            console.log("[Lytics] Route changed:", location.pathname);
+            jstag.pageView();
+            if (jstag.loadEntity) {
+              jstag.config.pathfora = jstag.config.pathfora || {};
+              jstag.config.pathfora.publish = {
+                candidates: { experiences: [], variations: [], legacyABTests: [] }
+              };
+              window._pfacfg = {};
+              if (window.pathfora && window.pathfora.clearAll) {
+                window.pathfora.clearAll();
               }
-            };
+              jstag.loadEntity((profile) => {
+                console.log("[Lytics] Profile refreshed", profile.data);
+              });
+            }
+          };
 
+          const patchHistory = () => {
             const wrap = (fn) => function(){
               const result = fn.apply(this, arguments);
-              triggerLytics();
+              window.dispatchEvent(new Event('lytics:navigation'));
               return result;
             };
             history.pushState = wrap(history.pushState);
             history.replaceState = wrap(history.replaceState);
-
-            window.addEventListener("popstate", triggerLytics);
           };
 
-          window.addEventListener("load", () => {
-            if (document.readyState === "complete") {
-              hookLyticsForSPA();
-            } else {
-              window.addEventListener("DOMContentLoaded", hookLyticsForSPA);
+          let lastPath = location.pathname;
+          setInterval(() => {
+            if (location.pathname !== lastPath) {
+              lastPath = location.pathname;
+              window.dispatchEvent(new Event('lytics:navigation'));
             }
+          }, 500);
+
+          const observer = new MutationObserver(() => {
+            const newPath = location.pathname;
+            if (newPath !== lastPath) {
+              lastPath = newPath;
+              window.dispatchEvent(new Event('lytics:navigation'));
+            }
+          });
+          observer.observe(document.body, { childList: true, subtree: true });
+
+          window.addEventListener("lytics:navigation", triggerLytics);
+
+          window.addEventListener("load", () => {
+            patchHistory();
           });
         })();
       </script>
     `;
 
-    // Inject the script before </head>
+    // Inject the script just before </head>
     html = html.replace('</head>', `${lyticsScript}</head>`);
 
     modifiedResponse = new Response(html, {
