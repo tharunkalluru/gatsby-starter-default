@@ -49,7 +49,6 @@ export default async function handler(request, context) {
             // Init Lytics
             jstag.init({
               src: 'https://c.lytics.io/api/tag/${lyticsKey}/latest.min.js',
-              pageAnalysis: { dataLayerPull: { disabled: true } }
             });
 
             // Initial pageView
